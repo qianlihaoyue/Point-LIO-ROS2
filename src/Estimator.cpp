@@ -1,402 +1,243 @@
 // #include <../include/IKFoM/IKFoM_toolkit/esekfom/esekfom.hpp>
 #include "Estimator.h"
 
+double laser_point_cov, acc_norm;
+double vel_cov, acc_cov_input, gyr_cov_input;
+double gyr_cov_output, acc_cov_output, b_gyr_cov, b_acc_cov;
+double imu_meas_acc_cov, imu_meas_omg_cov;
+double match_s, satu_acc, satu_gyro;
+bool check_satu;
+float plane_thr;
+
 PointCloudXYZI::Ptr normvec(new PointCloudXYZI(100000, 1));
 std::vector<int> time_seq;
-PointCloudXYZI::Ptr feats_down_body(new PointCloudXYZI(10000, 1));
-PointCloudXYZI::Ptr feats_down_world(new PointCloudXYZI(10000, 1));
+PointCloudXYZI::Ptr feats_down_body(new PointCloudXYZI());
+PointCloudXYZI::Ptr feats_down_world(new PointCloudXYZI());
 std::vector<V3D> pbody_list;
-std::vector<PointVector> Nearest_Points; 
-std::shared_ptr<IVoxType> ivox_ = nullptr;                    // localmap in ivox
+std::vector<PointVector> Nearest_Points;
+KD_TREE<PointType> ikdtree;
 std::vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
-bool   point_selected_surf[100000] = {0};
+bool point_selected_surf[100000] = {0};
 std::vector<M3D> crossmat_list;
 int effct_feat_num = 0;
-int k = 0;
-int idx = -1;
-esekfom::esekf<state_input, 24, input_ikfom> kf_input;
+int k;
+int idx;
 esekfom::esekf<state_output, 30, input_ikfom> kf_output;
+state_output state_out;
 input_ikfom input_in;
-V3D angvel_avr, acc_avr, acc_avr_norm;
-int feats_down_size = 0;  
+V3D angvel_avr, acc_avr;
+
 V3D Lidar_T_wrt_IMU(Zero3d);
 M3D Lidar_R_wrt_IMU(Eye3d);
-double G_m_s2 = 9.81;
 
-Eigen::Matrix<double, 24, 24> process_noise_cov_input()
-{
-	Eigen::Matrix<double, 24, 24> cov;
-	cov.setZero();
-	cov.block<3, 3>(3, 3).diagonal() << gyr_cov_input, gyr_cov_input, gyr_cov_input;
-	cov.block<3, 3>(12, 12).diagonal() << acc_cov_input, acc_cov_input, acc_cov_input;
-	cov.block<3, 3>(15, 15).diagonal() << b_gyr_cov, b_gyr_cov, b_gyr_cov;
-	cov.block<3, 3>(18, 18).diagonal() << b_acc_cov, b_acc_cov, b_acc_cov;
-	// MTK::get_cov<process_noise_input>::type cov = MTK::get_cov<process_noise_input>::type::Zero();
-	// MTK::setDiagonal<process_noise_input, vect3, 0>(cov, &process_noise_input::ng, gyr_cov_input);// 0.03
-	// MTK::setDiagonal<process_noise_input, vect3, 3>(cov, &process_noise_input::na, acc_cov_input); // *dt 0.01 0.01 * dt * dt 0.05
-	// MTK::setDiagonal<process_noise_input, vect3, 6>(cov, &process_noise_input::nbg, b_gyr_cov); // *dt 0.00001 0.00001 * dt *dt 0.3 //0.001 0.0001 0.01
-	// MTK::setDiagonal<process_noise_input, vect3, 9>(cov, &process_noise_input::nba, b_acc_cov);   //0.001 0.05 0.0001/out 0.01
-	return cov;
+typedef MTK::vect<3, double> vect3;
+typedef MTK::SO3<double> SO3;
+typedef MTK::S2<double, 98090, 10000, 1> S2;
+typedef MTK::vect<1, double> vect1;
+typedef MTK::vect<2, double> vect2;
+
+Eigen::Matrix<double, 24, 24> process_noise_cov_input() {
+    Eigen::Matrix<double, 24, 24> cov;
+    cov.setZero();
+    cov.block<3, 3>(3, 3).diagonal() << gyr_cov_input, gyr_cov_input, gyr_cov_input;
+    cov.block<3, 3>(12, 12).diagonal() << acc_cov_input, acc_cov_input, acc_cov_input;
+    cov.block<3, 3>(15, 15).diagonal() << b_gyr_cov, b_gyr_cov, b_gyr_cov;
+    cov.block<3, 3>(18, 18).diagonal() << b_acc_cov, b_acc_cov, b_acc_cov;
+    return cov;
 }
 
-Eigen::Matrix<double, 30, 30> process_noise_cov_output()
-{
-	Eigen::Matrix<double, 30, 30> cov;
-	cov.setZero();
-	cov.block<3, 3>(12, 12).diagonal() << vel_cov, vel_cov, vel_cov;
-	cov.block<3, 3>(15, 15).diagonal() << gyr_cov_output, gyr_cov_output, gyr_cov_output;
-	cov.block<3, 3>(18, 18).diagonal() << acc_cov_output, acc_cov_output, acc_cov_output;
-	cov.block<3, 3>(24, 24).diagonal() << b_gyr_cov, b_gyr_cov, b_gyr_cov;
-	cov.block<3, 3>(27, 27).diagonal() << b_acc_cov, b_acc_cov, b_acc_cov;
-	return cov;
+Eigen::Matrix<double, 30, 30> process_noise_cov_output() {
+    Eigen::Matrix<double, 30, 30> cov;
+    cov.setZero();
+    cov.block<3, 3>(12, 12).diagonal() << vel_cov, vel_cov, vel_cov;
+    cov.block<3, 3>(15, 15).diagonal() << gyr_cov_output, gyr_cov_output, gyr_cov_output;
+    cov.block<3, 3>(18, 18).diagonal() << acc_cov_output, acc_cov_output, acc_cov_output;
+    cov.block<3, 3>(24, 24).diagonal() << b_gyr_cov, b_gyr_cov, b_gyr_cov;
+    cov.block<3, 3>(27, 27).diagonal() << b_acc_cov, b_acc_cov, b_acc_cov;
+    return cov;
 }
 
-Eigen::Matrix<double, 24, 1> get_f_input(state_input &s, const input_ikfom &in)
-{
-	Eigen::Matrix<double, 24, 1> res = Eigen::Matrix<double, 24, 1>::Zero();
-	vect3 omega;
-	in.gyro.boxminus(omega, s.bg);
-	vect3 a_inertial = s.rot * (in.acc-s.ba); // .normalized()
-	for(int i = 0; i < 3; i++ ){
-		res(i) = s.vel[i];
-		res(i + 3) = omega[i]; 
-		res(i + 12) = a_inertial[i] + s.gravity[i]; 
-	}
-	return res;
+Eigen::Matrix<double, 30, 1> get_f_output(state_output &s, const input_ikfom &in) {
+    Eigen::Matrix<double, 30, 1> res = Eigen::Matrix<double, 30, 1>::Zero();
+    vect3 a_inertial = s.rot * s.acc;
+    for (int i = 0; i < 3; i++) {
+        res(i) = s.vel[i];
+        res(i + 3) = s.omg[i];
+        res(i + 12) = a_inertial[i] + s.gravity[i];
+    }
+    return res;
 }
 
-Eigen::Matrix<double, 30, 1> get_f_output(state_output &s, const input_ikfom &in)
-{
-	Eigen::Matrix<double, 30, 1> res = Eigen::Matrix<double, 30, 1>::Zero();
-	vect3 a_inertial = s.rot * s.acc; // .normalized()
-	for(int i = 0; i < 3; i++ ){
-		res(i) = s.vel[i];
-		res(i + 3) = s.omg[i]; 
-		res(i + 12) = a_inertial[i] + s.gravity[i]; 
-	}
-	return res;
+Eigen::Matrix<double, 30, 30> df_dx_output(state_output &s, const input_ikfom &in) {
+    Eigen::Matrix<double, 30, 30> cov = Eigen::Matrix<double, 30, 30>::Zero();
+    cov.template block<3, 3>(0, 12) = Eigen::Matrix3d::Identity();
+    cov.template block<3, 3>(12, 3) = -s.rot.normalized().toRotationMatrix() * MTK::hat(s.acc);
+    cov.template block<3, 3>(12, 18) = s.rot.normalized().toRotationMatrix();
+    cov.template block<3, 3>(12, 21) = Eigen::Matrix3d::Identity();  // grav_matrix;
+    cov.template block<3, 3>(3, 15) = Eigen::Matrix3d::Identity();
+    return cov;
 }
 
-Eigen::Matrix<double, 24, 24> df_dx_input(state_input &s, const input_ikfom &in)
-{
-	Eigen::Matrix<double, 24, 24> cov = Eigen::Matrix<double, 24, 24>::Zero();
-	cov.template block<3, 3>(0, 12) = Eigen::Matrix3d::Identity();
-	vect3 acc_;
-	in.acc.boxminus(acc_, s.ba);
-	vect3 omega;
-	in.gyro.boxminus(omega, s.bg);
-	cov.template block<3, 3>(12, 3) = -s.rot*MTK::hat(acc_); // .normalized().toRotationMatrix()
-	cov.template block<3, 3>(12, 18) = -s.rot; //.normalized().toRotationMatrix();
-	// Eigen::Matrix<state_ikfom::scalar, 2, 1> vec = Eigen::Matrix<state_ikfom::scalar, 2, 1>::Zero();
-	// Eigen::Matrix<state_ikfom::scalar, 3, 2> grav_matrix;
-	// s.S2_Mx(grav_matrix, vec, 21);
-	cov.template block<3, 3>(12, 21) = Eigen::Matrix3d::Identity(); // grav_matrix; 
-	cov.template block<3, 3>(3, 15) = -Eigen::Matrix3d::Identity(); 
-	return cov;
+// 将 SO3 旋转（四元数表示）转换为欧拉角
+vect3 SO3ToEuler(const SO3 &orient) {
+    Eigen::Matrix<double, 3, 1> _ang;
+    // 将输入的 orient 参数转换为四元数表示
+    Eigen::Vector4d q_data = orient.coeffs().transpose();
+    // scalar w=orient.coeffs[3], x=orient.coeffs[0], y=orient.coeffs[1], z=orient.coeffs[2];
+    double sqw = q_data[3] * q_data[3];
+    double sqx = q_data[0] * q_data[0];
+    double sqy = q_data[1] * q_data[1];
+    double sqz = q_data[2] * q_data[2];
+    double unit = sqx + sqy + sqz + sqw;  // if normalized is one, otherwise is correction factor
+    // 计算一个测试值 test，用于检查输入旋转是否靠近极点（北极或南极）
+    double test = q_data[3] * q_data[1] - q_data[2] * q_data[0];
+
+    if (test > 0.49999 * unit) {  // singularity at north pole
+        _ang << 2 * std::atan2(q_data[0], q_data[3]), M_PI / 2, 0;
+        double temp[3] = {_ang[0] * 57.3, _ang[1] * 57.3, _ang[2] * 57.3};
+        vect3 euler_ang(temp, 3);
+        return euler_ang;
+    }
+    if (test < -0.49999 * unit) {  // singularity at south pole
+        _ang << -2 * std::atan2(q_data[0], q_data[3]), -M_PI / 2, 0;
+        double temp[3] = {_ang[0] * 57.3, _ang[1] * 57.3, _ang[2] * 57.3};
+        vect3 euler_ang(temp, 3);
+        return euler_ang;
+    }
+    // 如果旋转没有靠近极点，计算欧拉角并返回
+    _ang << std::atan2(2 * q_data[0] * q_data[3] + 2 * q_data[1] * q_data[2], -sqx - sqy + sqz + sqw), std::asin(2 * test / unit),
+        std::atan2(2 * q_data[2] * q_data[3] + 2 * q_data[1] * q_data[0], sqx - sqy - sqz + sqw);
+    double temp[3] = {_ang[0] * 57.3, _ang[1] * 57.3, _ang[2] * 57.3};
+    vect3 euler_ang(temp, 3);
+    return euler_ang;
 }
 
-Eigen::Matrix<double, 30, 30> df_dx_output(state_output &s, const input_ikfom &in)
-{
-	Eigen::Matrix<double, 30, 30> cov = Eigen::Matrix<double, 30, 30>::Zero();
-	cov.template block<3, 3>(0, 12) = Eigen::Matrix3d::Identity();
-	cov.template block<3, 3>(12, 3) = -s.rot*MTK::hat(s.acc); // .normalized().toRotationMatrix()
-	cov.template block<3, 3>(12, 18) = s.rot; //.normalized().toRotationMatrix();
-	// Eigen::Matrix<state_ikfom::scalar, 2, 1> vec = Eigen::Matrix<state_ikfom::scalar, 2, 1>::Zero();
-	// Eigen::Matrix<state_ikfom::scalar, 3, 2> grav_matrix;
-	// s.S2_Mx(grav_matrix, vec, 21);
-	cov.template block<3, 3>(12, 21) = Eigen::Matrix3d::Identity(); // grav_matrix; 
-	cov.template block<3, 3>(3, 15) = Eigen::Matrix3d::Identity(); 
-	return cov;
+// 根据特征点和对应的平面参数求解 观测矩阵H
+void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_data) {
+    bool match_in_map = false;
+    VF(4) pabcd;
+    pabcd.setZero();
+
+    normvec->resize(time_seq[k]);
+    int effect_num_k = 0;  // 记录有效特征点数量
+    for (int j = 0; j < time_seq[k]; j++) {
+        // 获取点云数据中的点，将其从机器人体坐标系转换到世界坐标系。??
+        PointType &point_body_j = feats_down_body->points[idx + j + 1];
+        PointType &point_world_j = feats_down_world->points[idx + j + 1];
+        pointBodyToWorld(&point_body_j, &point_world_j);
+
+        V3D p_body = pbody_list[idx + j + 1];
+        V3D p_world;
+        p_world << point_world_j.x, point_world_j.y, point_world_j.z;
+        {
+            // 搜索最近邻,并拟合平面
+            auto &points_near = Nearest_Points[idx + j + 1];
+
+            ikdtree.Nearest_Search(point_world_j, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+
+            if ((points_near.size() < NUM_MATCH_POINTS) || pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5) {
+                point_selected_surf[idx + j + 1] = false;
+            } else {
+                point_selected_surf[idx + j + 1] = false;
+                if (esti_plane(pabcd, points_near, plane_thr))  //(planeValid)
+                {
+                    float pd2 = pabcd(0) * point_world_j.x + pabcd(1) * point_world_j.y + pabcd(2) * point_world_j.z + pabcd(3);
+
+                    if (p_body.norm() > match_s * pd2 * pd2) {
+                        point_selected_surf[idx + j + 1] = true;
+                        normvec->points[j].x = pabcd(0);
+                        normvec->points[j].y = pabcd(1);
+                        normvec->points[j].z = pabcd(2);
+                        normvec->points[j].intensity = pabcd(3);
+                        effect_num_k++;
+                    }
+                }
+            }
+        }
+    }
+    // 如果有效特征点数量为零，则将 ekfom_data.valid 设置为 false
+    if (effect_num_k == 0) {
+        ekfom_data.valid = false;
+        return;
+    }
+    // 外置参数0.1
+    ekfom_data.M_Noise = laser_point_cov;
+    ekfom_data.h_x = Eigen::MatrixXd::Zero(effect_num_k, 12);
+    ekfom_data.z.resize(effect_num_k);
+    int m = 0;
+    for (int j = 0; j < time_seq[k]; j++) {
+        // 遍历有效特征点
+        if (point_selected_surf[idx + j + 1]) {
+            // 计算法向量 norm_vec，并将其存储在 ekfom_data.h_x
+            V3D norm_vec(normvec->points[j].x, normvec->points[j].y, normvec->points[j].z);
+
+            M3D point_crossmat = crossmat_list[idx + j + 1];
+            V3D C(s.rot.conjugate() * norm_vec);
+            V3D A(point_crossmat * C);
+            // V3D A(point_crossmat * state.rot_end.transpose() * norm_vec);
+            ekfom_data.h_x.block<1, 12>(m, 0) << norm_vec(0), norm_vec(1), norm_vec(2), VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+            // 计算测量值 z，并将其存储在 ekfom_data.z
+            ekfom_data.z(m) = -norm_vec(0) * feats_down_world->points[idx + j + 1].x - norm_vec(1) * feats_down_world->points[idx + j + 1].y -
+                              norm_vec(2) * feats_down_world->points[idx + j + 1].z - normvec->points[j].intensity;
+            m++;
+        }
+    }
+    effct_feat_num += effect_num_k;
 }
 
-void h_model_input(state_input &s, Eigen::Matrix3d cov_p, Eigen::Matrix3d cov_R, esekfom::dyn_share_modified<double> &ekfom_data)
-{
-	bool match_in_map = false;
-	VF(4) pabcd;
-	pabcd.setZero();
-	normvec->resize(time_seq[k]);
-	int effect_num_k = 0;
-	for (int j = 0; j < time_seq[k]; j++)
-	{
-		PointType &point_body_j  = feats_down_body->points[idx+j+1];
-		PointType &point_world_j = feats_down_world->points[idx+j+1];
-		pointBodyToWorld(&point_body_j, &point_world_j); 
-		V3D p_body = pbody_list[idx+j+1];
-		double p_norm = p_body.norm();
-		V3D p_world;
-		p_world << point_world_j.x, point_world_j.y, point_world_j.z;
-		{
-			auto &points_near = Nearest_Points[idx+j+1];
-            ivox_->GetClosestPoint(point_world_j, points_near, NUM_MATCH_POINTS); // 
-			if ((points_near.size() < NUM_MATCH_POINTS)) // || pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5) // 5)
-			{
-				point_selected_surf[idx+j+1] = false;
-			}
-			else
-			{
-				point_selected_surf[idx+j+1] = false;
-				if (esti_plane(pabcd, points_near, plane_thr)) //(planeValid)
-				{
-					float pd2 = fabs(pabcd(0) * point_world_j.x + pabcd(1) * point_world_j.y + pabcd(2) * point_world_j.z + pabcd(3));
-					// V3D norm_vec;
-					// M3D Rpf, pf;
-					// pf = crossmat_list[idx+j+1];
-					// // pf << SKEW_SYM_MATRX(p_body);
-					// Rpf = s.rot * pf;
-					// norm_vec << pabcd(0), pabcd(1), pabcd(2);
-					// double noise_state = norm_vec.transpose() * (cov_p+Rpf*cov_R*Rpf.transpose())  * norm_vec + sqrt(p_norm) * 0.001;
-					// // if (p_norm > match_s * pd2 * pd2)
-					// double epsilon = pd2 / sqrt(noise_state);
-					// // cout << "check epsilon:" << epsilon << endl;
-					// double weight = 1.0; // epsilon / sqrt(epsilon * epsilon+1);
-					// if (epsilon > 1.0) 
-					// {
-					// 	weight = sqrt(2 * epsilon - 1) / epsilon;
-					// 	pabcd(0) = weight * pabcd(0);
-					// 	pabcd(1) = weight * pabcd(1);
-					// 	pabcd(2) = weight * pabcd(2);
-					// 	pabcd(3) = weight * pabcd(3);
-					// }
-					if (p_norm > match_s * pd2 * pd2)
-					{
-						point_selected_surf[idx+j+1] = true;
-						normvec->points[j].x = pabcd(0);
-						normvec->points[j].y = pabcd(1);
-						normvec->points[j].z = pabcd(2);
-						normvec->points[j].intensity = pabcd(3);
-						effect_num_k ++;
-					}
-				}  
-			}
-		}
-	}
-	if (effect_num_k == 0) 
-	{
-		ekfom_data.valid = false;
-		return;
-	}
-	ekfom_data.M_Noise = laser_point_cov;
-	ekfom_data.h_x.resize(effect_num_k, 12);
-	ekfom_data.h_x = Eigen::MatrixXd::Zero(effect_num_k, 12);
-	ekfom_data.z.resize(effect_num_k);
-	int m = 0;
-	
-	for (int j = 0; j < time_seq[k]; j++)
-	{
-		// ekfom_data.converge = false;
-		if(point_selected_surf[idx+j+1])
-		{
-			V3D norm_vec(normvec->points[j].x, normvec->points[j].y, normvec->points[j].z);
-			
-			if (extrinsic_est_en)
-			{
-				V3D p_body = pbody_list[idx+j+1];
-				M3D p_crossmat, p_imu_crossmat;
-				p_crossmat << SKEW_SYM_MATRX(p_body);
-				V3D point_imu = s.offset_R_L_I * p_body + s.offset_T_L_I;
-				p_imu_crossmat << SKEW_SYM_MATRX(point_imu);
-				V3D C(s.rot.transpose() * norm_vec);
-				V3D A(p_imu_crossmat * C);
-				V3D B(p_crossmat * s.offset_R_L_I.transpose() * C);
-				ekfom_data.h_x.block<1, 12>(m, 0) << norm_vec(0), norm_vec(1), norm_vec(2), VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C);
-			}
-			else
-			{   
-				M3D point_crossmat = crossmat_list[idx+j+1];
-				V3D C(s.rot.transpose() * norm_vec); // conjugate().normalized()
-				V3D A(point_crossmat * C);
-				ekfom_data.h_x.block<1, 12>(m, 0) << norm_vec(0), norm_vec(1), norm_vec(2), VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
-			}
-			ekfom_data.z(m) = -norm_vec(0) * feats_down_world->points[idx+j+1].x -norm_vec(1) * feats_down_world->points[idx+j+1].y -norm_vec(2) * feats_down_world->points[idx+j+1].z-normvec->points[j].intensity;
-			
-			m++;
-		}
-	}
-	effct_feat_num += effect_num_k;
-}
-
-void h_model_output(state_output &s, Eigen::Matrix3d cov_p, Eigen::Matrix3d cov_R, esekfom::dyn_share_modified<double> &ekfom_data)
-{
-	bool match_in_map = false;
-	VF(4) pabcd;
-	pabcd.setZero();
-	normvec->resize(time_seq[k]);
-	int effect_num_k = 0;
-	for (int j = 0; j < time_seq[k]; j++)
-	{
-		PointType &point_body_j  = feats_down_body->points[idx+j+1];
-		PointType &point_world_j = feats_down_world->points[idx+j+1];
-		pointBodyToWorld(&point_body_j, &point_world_j); 
-		V3D p_body = pbody_list[idx+j+1];
-		double p_norm = p_body.norm();
-		V3D p_world;
-		p_world << point_world_j.x, point_world_j.y, point_world_j.z;
-		{
-			auto &points_near = Nearest_Points[idx+j+1];
-			
-            ivox_->GetClosestPoint(point_world_j, points_near, NUM_MATCH_POINTS); // 
-			
-			if ((points_near.size() < NUM_MATCH_POINTS)) // || pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5)
-			{
-				point_selected_surf[idx+j+1] = false;
-			}
-			else
-			{
-				point_selected_surf[idx+j+1] = false;
-				if (esti_plane(pabcd, points_near, plane_thr)) //(planeValid)
-				{
-					float pd2 = fabs(pabcd(0) * point_world_j.x + pabcd(1) * point_world_j.y + pabcd(2) * point_world_j.z + pabcd(3));
-					// V3D norm_vec;
-					// M3D Rpf, pf;
-					// pf = crossmat_list[idx+j+1];
-					// // pf << SKEW_SYM_MATRX(p_body);
-					// Rpf = s.rot * pf;
-					// norm_vec << pabcd(0), pabcd(1), pabcd(2);
-					// double noise_state = norm_vec.transpose() * (cov_p+Rpf*cov_R*Rpf.transpose())  * norm_vec + sqrt(p_norm) * 0.001;
-					// // if (p_norm > match_s * pd2 * pd2)
-					// double epsilon = pd2 / sqrt(noise_state);
-					// double weight = 1.0; // epsilon / sqrt(epsilon * epsilon+1);
-					// if (epsilon > 1.0) 
-					// {
-					// 	weight = sqrt(2 * epsilon - 1) / epsilon;
-					// 	pabcd(0) = weight * pabcd(0);
-					// 	pabcd(1) = weight * pabcd(1);
-					// 	pabcd(2) = weight * pabcd(2);
-					// 	pabcd(3) = weight * pabcd(3);
-					// }
-					if (p_norm > match_s * pd2 * pd2)
-					{
-						// point_selected_surf[i] = true;
-						point_selected_surf[idx+j+1] = true;
-						normvec->points[j].x = pabcd(0);
-						normvec->points[j].y = pabcd(1);
-						normvec->points[j].z = pabcd(2);
-						normvec->points[j].intensity = pabcd(3);
-						effect_num_k ++;
-					}
-				}  
-			}
-		}
-	}
-	if (effect_num_k == 0) 
-	{
-		ekfom_data.valid = false;
-		return;
-	}
-	ekfom_data.M_Noise = laser_point_cov;
-	ekfom_data.h_x.resize(effect_num_k, 12);
-	ekfom_data.h_x = Eigen::MatrixXd::Zero(effect_num_k, 12);
-	ekfom_data.z.resize(effect_num_k);
-	int m = 0;
-	for (int j = 0; j < time_seq[k]; j++)
-	{
-		// ekfom_data.converge = false;
-		if(point_selected_surf[idx+j+1])
-		{
-			V3D norm_vec(normvec->points[j].x, normvec->points[j].y, normvec->points[j].z);
-			if (extrinsic_est_en)
-			{
-				V3D p_body = pbody_list[idx+j+1];
-				M3D p_crossmat, p_imu_crossmat;
-				p_crossmat << SKEW_SYM_MATRX(p_body);
-				V3D point_imu = s.offset_R_L_I * p_body + s.offset_T_L_I;
-				p_imu_crossmat << SKEW_SYM_MATRX(point_imu);
-				V3D C(s.rot.transpose() * norm_vec);
-				V3D A(p_imu_crossmat * C);
-				V3D B(p_crossmat * s.offset_R_L_I.transpose() * C);
-				ekfom_data.h_x.block<1, 12>(m, 0) << norm_vec(0), norm_vec(1), norm_vec(2), VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C);
-			}
-			else
-			{   
-				M3D point_crossmat = crossmat_list[idx+j+1];
-				V3D C(s.rot.transpose() * norm_vec); // conjugate().normalized()
-				V3D A(point_crossmat * C);
-				ekfom_data.h_x.block<1, 12>(m, 0) << norm_vec(0), norm_vec(1), norm_vec(2), VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
-			}
-			ekfom_data.z(m) = -norm_vec(0) * feats_down_world->points[idx+j+1].x -norm_vec(1) * feats_down_world->points[idx+j+1].y -norm_vec(2) * feats_down_world->points[idx+j+1].z-normvec->points[j].intensity;
-			
-			m++;
-		}
-	}
-	effct_feat_num += effect_num_k;
-}
-
-void h_model_IMU_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_data)
-{
+// 处理 IMU 输出数据，计算 IMU 测量误差，并检查 IMU 饱和状态
+void h_model_IMU_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_data) {
+    // 将 satu_check 数组的所有元素初始化为 false
     std::memset(ekfom_data.satu_check, false, 6);
-	ekfom_data.z_IMU.block<3,1>(0, 0) = angvel_avr - s.omg - s.bg;
-	ekfom_data.z_IMU.block<3,1>(3, 0) = acc_avr * G_m_s2 / acc_norm - s.acc - s.ba;
+    // 计算陀螺仪和加速度计的测量误差，分别存储在 z_IMU 的前三个元素和后三个元素中
+    ekfom_data.z_IMU.block<3, 1>(0, 0) = angvel_avr - s.omg - s.bg;
+    ekfom_data.z_IMU.block<3, 1>(3, 0) = acc_avr * G_m_s2 / acc_norm - s.acc - s.ba;
+    // 设置 R_IMU 为陀螺仪和加速度计的测量协方差矩阵
     ekfom_data.R_IMU << imu_meas_omg_cov, imu_meas_omg_cov, imu_meas_omg_cov, imu_meas_acc_cov, imu_meas_acc_cov, imu_meas_acc_cov;
-	if(check_satu)
-	{
-		if(fabs(angvel_avr(0)) >= 0.99 * satu_gyro)
-		{
-			ekfom_data.satu_check[0] = true; 
-			ekfom_data.z_IMU(0) = 0.0;
-		}
-		
-		if(fabs(angvel_avr(1)) >= 0.99 * satu_gyro) 
-		{
-			ekfom_data.satu_check[1] = true;
-			ekfom_data.z_IMU(1) = 0.0;
-		}
-		
-		if(fabs(angvel_avr(2)) >= 0.99 * satu_gyro)
-		{
-			ekfom_data.satu_check[2] = true;
-			ekfom_data.z_IMU(2) = 0.0;
-		}
-		
-		if(fabs(acc_avr(0)) >= 0.99 * satu_acc)
-		{
-			ekfom_data.satu_check[3] = true;
-			ekfom_data.z_IMU(3) = 0.0;
-		}
+    // 饱和检查,默认配置启用
+    if (check_satu) {
+        // 分别检查三轴陀螺仪是否接近饱和值（satu_gyro * 0.99），如果接近，则将对应的 satu_check 设为 z_IMU 设为 0
+        if (fabs(angvel_avr(0)) >= 0.99 * satu_gyro) {
+            ekfom_data.satu_check[0] = true;
+            ekfom_data.z_IMU(0) = 0.0;
+        }
 
-		if(fabs(acc_avr(1)) >= 0.99 * satu_acc) 
-		{
-			ekfom_data.satu_check[4] = true;
-			ekfom_data.z_IMU(4) = 0.0;
-		}
+        if (fabs(angvel_avr(1)) >= 0.99 * satu_gyro) {
+            ekfom_data.satu_check[1] = true;
+            ekfom_data.z_IMU(1) = 0.0;
+        }
 
-		if(fabs(acc_avr(2)) >= 0.99 * satu_acc) 
-		{
-			ekfom_data.satu_check[5] = true;
-			ekfom_data.z_IMU(5) = 0.0;
-		}
-	}
+        if (fabs(angvel_avr(2)) >= 0.99 * satu_gyro) {
+            ekfom_data.satu_check[2] = true;
+            ekfom_data.z_IMU(2) = 0.0;
+        }
+
+        // 三轴加速度计同理
+        if (fabs(acc_avr(0)) >= 0.99 * satu_acc) {
+            ekfom_data.satu_check[3] = true;
+            ekfom_data.z_IMU(3) = 0.0;
+        }
+
+        if (fabs(acc_avr(1)) >= 0.99 * satu_acc) {
+            ekfom_data.satu_check[4] = true;
+            ekfom_data.z_IMU(4) = 0.0;
+        }
+
+        if (fabs(acc_avr(2)) >= 0.99 * satu_acc) {
+            ekfom_data.satu_check[5] = true;
+            ekfom_data.z_IMU(5) = 0.0;
+        }
+    }
 }
 
-void pointBodyToWorld(PointType const * const pi, PointType * const po)
-{    
+void pointBodyToWorld(PointType const *const pi, PointType *const po) {
     V3D p_body(pi->x, pi->y, pi->z);
-    
-    V3D p_global;
-	if (extrinsic_est_en)
-	{	
-		if (!use_imu_as_input)
-		{
-			p_global = kf_output.x_.rot * (kf_output.x_.offset_R_L_I * p_body + kf_output.x_.offset_T_L_I) + kf_output.x_.pos;
-		}
-		else
-		{
-			p_global = kf_input.x_.rot * (kf_input.x_.offset_R_L_I * p_body + kf_input.x_.offset_T_L_I) + kf_input.x_.pos;
-		}
-	}
-	else
-	{
-		if (!use_imu_as_input)
-		{
-			p_global = kf_output.x_.rot * (Lidar_R_wrt_IMU * p_body + Lidar_T_wrt_IMU) + kf_output.x_.pos; // .normalized()
-		}
-		else
-		{
-			p_global = kf_input.x_.rot * (Lidar_R_wrt_IMU * p_body + Lidar_T_wrt_IMU) + kf_input.x_.pos; // .normalized()
-		}
-	}
+    V3D p_global = kf_output.x_.rot * (Lidar_R_wrt_IMU * p_body + Lidar_T_wrt_IMU) + kf_output.x_.pos;
 
     po->x = p_global(0);
     po->y = p_global(1);
     po->z = p_global(2);
     po->intensity = pi->intensity;
 }
+
+const bool time_list(PointType &x, PointType &y) { return (x.curvature < y.curvature); };
