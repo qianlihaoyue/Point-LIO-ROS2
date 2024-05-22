@@ -1,9 +1,11 @@
 # Update
-1.1 - 添加注释，分裂laserMapping, 去除IMU输入
-1.2 - 移植fast_lio_sam优化
-1.3 - 添加IESEKF注释
+- 1.1 - 添加注释，分裂laserMapping, 去除IMU输入
 
-2.0 - 5.22 - to ros2 && debug && format && tidy
+- 1.2 - 移植fast_lio_sam优化
+
+- 1.3 - 添加IESEKF注释
+
+- 2.0 - 5.22 - to ros2 && debug && format && tidy
 
 
 # Point-LIO (Ubuntu 18.04 has environment problems for Point-LIO, please use Ubuntu 20.04 and above)
